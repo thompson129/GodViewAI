@@ -1,3 +1,2 @@
 ultralytics
 cvzone
-cv2
