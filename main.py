@@ -1,65 +1,84 @@
 import cv2
-import cvzone
 import math
-import time
 from ultralytics import YOLO
 
-# === YOLO + Webcam ===
-cap = cv2.VideoCapture(1)
-model = YOLO('yolov8n.pt')
+def calculate_angle(p1, p2):
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    angle = abs(math.degrees(math.atan2(dy, dx)))
+    return angle
 
-# Load classes
-classnames = []
-with open('classes.txt', 'r') as f:
-    classnames = f.read().splitlines()
+def classify_posture(angle):
+    if angle < 45:
+        return "Falling"
+    elif angle < 70:
+        return "Sitting"
+    else:
+        return "Standing"
 
-# Constants
-FRAME_HEIGHT = 740
-FALL_Y_THRESHOLD = int(FRAME_HEIGHT * 0.85)
-FALL_COOLDOWN = 30  # seconds
-last_fall_time = 0
+# Load YOLOv8 pose model
+model = YOLO("yolov8n-pose.pt")
 
-while True:
+# Load input video
+video_path = "fall.mp4"
+cap = cv2.VideoCapture(video_path)
+
+fps = cap.get(cv2.CAP_PROP_FPS)
+falling_count = 0
+fall_detected = False
+
+while cap.isOpened():
     ret, frame = cap.read()
-    frame = cv2.resize(frame, (980, FRAME_HEIGHT))
+    if not ret:
+        break
 
     results = model(frame)
 
-    for info in results:
-        parameters = info.boxes
-        for box in parameters:
-            x1, y1, x2, y2 = map(int, box.xyxy[0])
-            confidence = float(box.conf[0])
-            class_id = int(box.cls[0])
-            class_name = classnames[class_id]
-            conf = math.ceil(confidence * 100)
+    for result in results:
+        keypoints = result.keypoints.xy  # [num_people, num_keypoints, 2]
 
-            height = y2 - y1
-            width = x2 - x1
-            aspect_ratio = height / width if width != 0 else 0
+        for i, kps in enumerate(keypoints):
+            if len(kps) < 13:
+                continue  # skip if keypoints are incomplete
 
-            if conf > 70 and class_name == 'person':
-                # Draw box
-                cvzone.cornerRect(frame, [x1, y1, width, height], l=30, rt=6)
+            # Get body joint coordinates
+            left_shoulder = kps[5]
+            right_shoulder = kps[6]
+            left_hip = kps[11]
+            right_hip = kps[12]
 
-                # Posture classification
-                posture = "Unknown"
-                if aspect_ratio > 1.5:
-                    posture = "Standing"
-                elif 1.0 < aspect_ratio <= 1.5:
-                    posture = "Sitting"
+            # Midpoints
+            shoulder_center = ((left_shoulder[0] + right_shoulder[0]) / 2,
+                               (left_shoulder[1] + right_shoulder[1]) / 2)
+            hip_center = ((left_hip[0] + right_hip[0]) / 2,
+                          (left_hip[1] + right_hip[1]) / 2)
 
-                # Fall detection
-                is_fall = aspect_ratio < 0.7 and y2 > FALL_Y_THRESHOLD
-                if is_fall:
-                    posture = "⚠️ Fall Detected"
-                    cvzone.putTextRect(frame, posture, [x1, y2 + 10], scale=1.5, colorR=(0, 0, 255), colorT=(255, 255, 255))
+            # Angle & posture
+            torso_angle = calculate_angle(hip_center, shoulder_center)
+            posture = classify_posture(torso_angle)
 
-                else:
-                    # Show posture if not fallen
-                    cvzone.putTextRect(frame, posture, [x1, y1 - 10], scale=1.5)
+            # Draw posture
+            annotated = result.plot()
+            cv2.putText(annotated, posture, (int(shoulder_center[0]), int(shoulder_center[1]) - 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
 
-    cv2.imshow('Standing, Sitting, Fall Detection', frame)
+            # Fall detection
+            if posture == "Falling":
+                falling_count += 1
+            else:
+                falling_count = 0
+
+            if 0.1 * fps <= falling_count <= 0.5 * fps:
+                fall_detected = True
+            if posture == "Standing":
+                fall_detected = False
+
+            if fall_detected:
+                cv2.putText(annotated, "FALL DETECTED", (10, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 255), 3)
+
+    # Show live frame
+    cv2.imshow("Fall Detection", annotated)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
